@@ -4,7 +4,7 @@
 " Filename: coq_IDE.vim
 " Author:   Matthieu Carlier <matthieu.carlier@caramail.fr>
 " URL:      http://www.vim.org/scripts/script.php?script_id=4388
-" $revision: 0.96b$
+" $revision: 0.97b$
 "
 " License: CeCILL-C V1
 "
@@ -27,6 +27,9 @@
 "
 " If you want to load default key binding, add "let g:CoqIDEDefaultMap = 1"
 " in your "~/.vimrc" or execute command "CoqIDESetMap" after loading a "*.v".
+"
+" You can pass extra arguments to "copqtop.opt" process by setting
+" "CoqIDE_coqtop_option" in your "~/.vimrc".
 "
 " Here are the default key bindings :
 "    <F2> -> IDEUndo
@@ -59,6 +62,13 @@
 "  - :redraw doesn't work on MacVim GUI. What about gvim ?
 "
 " History:
+"   2013-09-04
+"     Improvement from Shu-Chun Weng:
+"       - Customize coqtop options: read from CoqIDE_coqtop_option
+"       - Check and show background goals when the foreground ones are all done.
+"       - ProceedUntilCursor reads the character under the cursor, too, so that
+"         you can park the cursor on the period and still get the last command in.
+"
 "   2013-05-18
 "     Correct end of expresssion detection when '..' syntax is used.
 "
@@ -88,6 +98,12 @@ else
   let s:coqtop = 'coqtop.opt'
 endif
 
+if exists('CoqIDE_coqtop_option')
+  let s:coqtop_option = CoqIDE_coqtop_option
+else
+  let s:coqtop_option = ''
+endif
+
 if exists('g:loaded_CoqIDE')
   finish
 endif
@@ -107,6 +123,8 @@ if executable(s:coqtop) < 1
   echoerr s:coqtop . ': command not found.'
   finish
 endif
+
+let s:coqtop = s:coqtop . ' ' . s:coqtop_option
 
 " Prelude: definition of utilities {{{1
 " XML Queries Syntax :
@@ -330,7 +348,7 @@ endfunction
 "
 "
 highlight CoqIDEDebug ctermbg=LightBlue guibg=LightBlue
-highlight SentToCoq ctermbg=LightGreen guibg=LightGreen
+highlight SentToCoq ctermbg=LightGreen guibg=#1E261C
 highlight WillSendToCoq ctermbg=Yellow guibg=Yellow
 highlight link CoqTopError Error
 
@@ -531,7 +549,8 @@ function s:LaunchCoqtop(force)
     close($RVim);
     open(\*STDIN, '<&RCoq');
     open(\*STDOUT, '>&WCoq');
-    exec(VIM::Eval('s:coqtop') . ' -ideslave');
+    open(\*STDERR, '>' . ("$^O" ne 'MSWin32'?'/dev/null':'nul'));
+    exec(VIM::Eval('s:coqtop') . ' -ideslave ' . VIM::Eval('s:coqtop_option'));
     exit;
   }
 
@@ -619,8 +638,6 @@ endfunction
 " Read last coqtop xml response. This function should by preceded by a call to
 " WriteCoqTop()
 function s:ReadCoqTop(interrupt)
-  let line = ""
-
   " When we are authorized to interrupt computation, wait for either user pressed
   " 'b' or coq has finished it computations.
 :perl <<EOF
@@ -658,7 +675,6 @@ EOF
   " SIGINT signal. In such a case, coqtop postpones the treatment of the
   " signal. This signal is treated when the next command is sent and coqtop
   " answers "User interrupt".
-
   if raw_resp == ''
     throw 'broken_pipe'
   endif
@@ -694,7 +710,7 @@ function s:XML_decode_goal(s)
   if a:s == ''
     return []
   endif
-  if match(a:s, '</list>') != -1
+  "if match(a:s, '</list>') != -1
     " at least one hypothesis
     let [_, l:tmp1, l:goal, _, _, _, _, _, _, _] = matchlist(a:s, '^.*<list>\(.*\)</list><string>\(.*\)</string>$')
     let l:tmp2 = split(substitute(l:tmp1, '^<string>\(.*\)</string>$', '\1', ''), '</string><string>')
@@ -702,11 +718,11 @@ function s:XML_decode_goal(s)
     for l:hyp in l:tmp2
       let l:hyps += split(l:hyp, '\n')
     endfor
-  else
+  "else
     " no hypothesis
-    let l:hyps = []
-    let [_, l:goal, _, _, _, _, _, _, _, _] = matchlist(a:s, '^<list/><string>\(.*\)</string>$')
-  endif
+  "  let l:hyps = []
+  "  let [_, l:goal, _, _, _, _, _, _, _, _] = matchlist(a:s, '^<list/><string>\(.*\)</string>$')
+  "endif
 
   call map(l:hyps, 's:XML_unescape(v:val)')
   return [l:hyps, split(s:XML_unescape(l:goal), '\n')]
@@ -737,28 +753,33 @@ endfunction
 
 function s:XML_decode_goals(s)
   if a:s =~# '^<option val="none"/>'
-    return [[],[]]
+    return [[],[], 0]
   endif
-  " some(...)
 
   " For avoiding bad surprises :
   let l:raw_resp = substitute(a:s, '<list/>', '<list></list>', 'g')
 
   let l:raw_resp = substitute(l:raw_resp, '^<option val="[^"]*"><goals>\(.*\)</goals></option>$', '\1', '')
+
+  let l:match = matchlist(l:raw_resp, '^<list>\(.\{-}\)</list><list>\(.*\)</list>$')
+  if len(l:match) != 10
+    return [[],[], 0]
+  endif
   let [_, l:fg, l:bg, _, _, _, _, _, _, _] = matchlist(l:raw_resp, '^<list>\(.\{-}\)</list><list>\(.*\)</list>$')
 
   let l:fg_goal_list = split(substitute(l:fg, '^<goal>\(.*\)</goal>$', '\1', ''), '</goal><goal>')
   call map(l:fg_goal_list, 's:XML_decode_goal(v:val)')
 
-
+  let l:bg = substitute(l:bg, '</\?pair/\?>', '', 'g')
+  let l:bg = substitute(l:bg, '^<list>\(.*\)</list>$', '\1', '')
+  let l:bg = substitute(l:bg, '</list><list>', '', 'g')
   let l:bg_goal_list = split(substitute(l:bg, '^<goal>\(.*\)</goal>$', '\1', ''), '</goal><goal>')
 "  call map(l:bg_goal_list, 's:XML_decode_goal(v:val)')
 
-  return [l:fg_goal_list, l:bg_goal_list]
+  return [l:fg_goal_list, l:bg_goal_list, 1]
 endfunction
 
 function s:SendCommand(type, opt, s)
-
   if a:type == 'interp'
 
     " substitutions for XML syntax compliance
@@ -775,7 +796,7 @@ function s:SendCommand(type, opt, s)
     let l:s = substitute(l:s, "'", '\&apos;', 'g')
     let l:s = substitute(l:s, '"', '\&quot;', 'g')
 
-    let l:query = '<call val="interp">' . l:s . '</call>'
+    let l:query = '<call val="interp" verbose="1">' . l:s . '</call>'
     let b:lastquerykind = 'interp'
     let b:lastquery = l:query
   elseif a:type == 'rewind'
@@ -850,7 +871,19 @@ function s:GetResponse(interrupt)
     return ['int', l:int_resp]
   endif
 
-  return ['unkown', [l:resp]]
+  let l:option_resp = substitute(l:resp, '^<option val="\([^"]*\)"[^>]*>.*$', '\1', '')
+  if strlen(l:option_resp) != strlen(l:resp)
+    return ['option', [l:option_resp]]
+  endif
+
+  let l:message_resp = substitute(l:resp, '^<message>\(.*\)</message>$', '\1', '')
+  if strlen(l:message_resp) != strlen(l:resp)
+    let l:message_lvl = substitute(l:message_resp,'^<message_level val="\([^"]*\)"[^>]*>.*$','\1','')
+    let l:message_val = substitute(l:message_resp,'^<message_level val="\([^"]*\)"[^>]*>.*<string>\(.*\)</string>$','\2','')
+    return ['message', [l:message_lvl] + split(s:XML_unescape(l:message_val), '\n')]
+  endif
+
+  return ['unknown', [l:resp]]
 endfunction
 
 """"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
@@ -1011,6 +1044,8 @@ function s:ShowGoalsErrorBuffers()
     setlocal scrolloff=0
     setlocal buftype=nofile
     setlocal noswapfile
+    setlocal wrap
+    setlocal foldmethod=manual
     let s:bgoals = bufnr('%')
     silent normal gg"_dG
     call s:AddSyntaxColor()
@@ -1025,6 +1060,8 @@ function s:ShowGoalsErrorBuffers()
     setlocal buftype=nofile
     setlocal scrolloff=0
     setlocal noswapfile
+    setlocal wrap
+    setlocal foldmethod=manual
     let s:berror = bufnr('%')
     silent normal gg"_dG
     call s:AddSyntaxColor()
@@ -1040,12 +1077,12 @@ function s:HideGoalsErrorBuffers()
   let l:allbuf = tabpagebuflist()
   let l:i = 0
   while l:i < len(l:allbuf)
-     if l:allbuf[l:i] == s:berror
+     if exists('s:berror') && l:allbuf[l:i] == s:berror
        execute (l:i + 1) . 'wincmd w'
        execute ':q'
      endif
 
-     if l:allbuf[l:i] == s:bgoals
+     if exists('s:bgoals') && l:allbuf[l:i] == s:bgoals
        execute (l:i + 1) . 'wincmd w'
        execute ':q'
      endif
@@ -1065,12 +1102,27 @@ endfunction
 
 " Go to s:berror buffer in current window and replace its content by goals given in a:fgbg
 function s:ShowGoals(fgbg)
-  let [l:fg, l:bg] = a:fgbg
+  let [l:fg, l:bg, l:in_proof] = a:fgbg
 
   execute 'sbuffer ' . s:bgoals
   silent normal gg"_dG
 
+  if l:in_proof == 0
+    return
+  endif
   if l:fg == []
+    if l:bg == []
+      call append(0, 'No more subgoals.')
+    else
+      call append(0, 'This subproof is complete, but there are still unfocused goals:')
+      call map(l:bg, 's:XML_decode_goal(v:val)')
+      let l:count = 2
+      for l:remaingoal in l:bg
+        let [_, l:goal] = l:remaingoal
+        call append(l:count, l:goal)
+        let l:count += 1
+      endfor
+    endif
     return
   endif
 
@@ -1151,7 +1203,12 @@ function s:SendNextCmd(tline, tcol)
     call s:Debug('info', 'End of command  at : ' . l:nline . ', ' . l:ncol)
     if l:tobesent
       call s:SendCommand('interp', '', l:s)
-      let [_, b:info] = s:GetResponse(1)
+      let [l:type, l:resp] = s:GetResponse(1)
+      let b:info = []
+      while l:type == 'message'
+        let b:info = b:info + l:resp
+        let [l:type, l:resp] = s:GetResponse(0)
+      endwhile
     endif
   catch /eof/
     return 0
@@ -1181,7 +1238,12 @@ function s:SendOneCmd()
       call s:SetColorTarget()
       call setpos('.', l:savpos) | redraw
       call s:SendCommand('interp', '', l:s)
-      let [_, b:info] = s:GetResponse(1)
+      let [l:type, l:resp] = s:GetResponse(1)
+      let b:info = []
+      while l:type == 'message'
+        let b:info = b:info + l:resp
+        let [l:type, l:resp] = s:GetResponse(0)
+      endwhile
     endif
   catch /eof/
     call s:Debug('SendOneCmd', '<<< SendOneCmd() -> 0 (EOF)')
@@ -1234,7 +1296,12 @@ function s:UndoTo(nb)
 
   try " Undo a bunch of lines containing commands
     call s:SendCommand('rewind', l:nbrewind, '')
-    let [l:type, l:extrarewind] = s:GetResponse(0)
+    let [l:type, l:resp] = s:GetResponse(0)
+    if l:type == 'int'
+      let l:extrarewind = l:resp
+    else
+      let l:extrarewind = 0
+    endif
   catch /^fail$/ " the other fail is unlikely to happen
     return -1
   endtry
@@ -1303,7 +1370,7 @@ endfunction
 
 function s:ProceedUntilCursor()
   let [_, l:cline, l:ccol, _] = getpos('.')
-  return s:SendCmdUntilPos(l:cline, l:ccol)
+  return s:SendCmdUntilPos(l:cline, l:ccol + 1)
 endfunction
 
 function s:ProceedUntilEnd()
@@ -1333,7 +1400,7 @@ function CoqIDESetOption(num, b)
 
   if a:num == 0
     let l:opt = ['Printing', 'Implicit']
-    let l:desc = 'notation'
+    let l:desc = 'implicit arguments'
   elseif a:num == 1
     let l:opt = ['Printing', 'Coercions']
     let l:desc = 'coercions'
